@@ -1,2 +1,697 @@
-# Hackathon-Dicoding2026-OmniServe
-OmniServe adalah platform otomasi layanan pelanggan berbasis AI yang mendukung komunikasi multibahasa, dirancang khusus untuk UMKM Indonesia.
+# OmniServe
+
+Otomasi layanan pelanggan multibahasa berbasis AI untuk UKM Indonesia.
+Dibangun untuk Tema 26 (AI & Otomasi Layanan) — Dicoding AI Impact Challenge 2026.
+
+**Tumpukan Teknologi:** Python · FastAPI · Azure Bot Service · Azure AI Language · Azure AI Translator · Azure Cosmos DB · Azure AI Search · Claude Sonnet API
+
+---
+
+## Daftar Isi
+
+1. [Struktur Proyek](#struktur-proyek)
+2. [Fase 0: Prasyarat](#fase-0-prasyarat)
+3. [Fase 1: Penyediaan Azure](#fase-1-penyediaan-azure)
+4. [Fase 2: Pengaturan Lokal](#fase-2-pengaturan-lokal)
+5. [Fase 3: Menjalankan dan Menguji](#fase-3-menjalankan-dan-menguji)
+6. [Fase 4: Deploy ke Azure](#fase-4-deploy-ke-azure)
+7. [Referensi Variabel Lingkungan](#referensi-variabel-lingkungan)
+8. [Referensi API](#referensi-api)
+9. [Gambaran Arsitektur](#gambaran-arsitektur)
+10. [Ringkasan Azure Free Tier](#ringkasan-azure-free-tier)
+
+---
+
+## Struktur Proyek
+
+```
+omniServe/
+├── app/
+│   ├── main.py                    # Titik masuk FastAPI
+│   ├── config.py                  # Pengaturan Pydantic dari .env
+│   ├── routes/
+│   │   ├── bot.py                 # Endpoint webhook (web + WhatsApp)
+│   │   └── health.py              # Pemeriksaan kesehatan
+│   ├── services/
+│   │   ├── pipeline.py            # Orkestrasi inti pesan 8 langkah
+│   │   ├── claude_service.py      # Integrasi Claude Sonnet API
+│   │   ├── translator_service.py  # Azure AI Translator
+│   │   ├── language_service.py    # Azure AI Language (intent, sentimen)
+│   │   ├── search_service.py      # Azure AI Search (basis pengetahuan)
+│   │   └── cosmos_service.py      # Azure Cosmos DB (riwayat percakapan)
+│   ├── models/
+│   │   ├── message.py             # Model IncomingMessage, BotResponse
+│   │   └── conversation.py        # Model percakapan + giliran
+│   └── utils/
+│       ├── logger.py              # Logging terstruktur via structlog
+│       └── helpers.py             # Fungsi utilitas
+├── azure_functions/
+│   └── process_message/           # Titik masuk Azure Function tanpa server
+├── tests/
+│   ├── conftest.py                # Konfigurasi pytest + variabel lingkungan tiruan
+│   ├── test_claude.py             # Uji unit layanan Claude
+│   ├── test_language.py           # Uji unit Azure AI Language
+│   └── test_translator.py         # Uji unit Azure AI Translator
+├── docs/
+│   └── create-search-index.json   # Skema indeks Azure AI Search
+├── .env.example                   # Template variabel lingkungan
+├── requirements.txt               # Dependensi Python
+├── host.json                      # Konfigurasi host Azure Functions
+├── pytest.ini                     # Konfigurasi pytest
+├── CLAUDE.md                      # Instruksi proyek Claude Code
+└── README.md                      # File ini
+```
+
+---
+
+## Fase 0: Prasyarat
+
+**Estimasi waktu: 30 menit**
+
+### 1. Instal Python 3.11 atau lebih baru
+
+```bash
+python --version
+# Harus menampilkan Python 3.11.x atau lebih tinggi
+# Unduh dari https://python.org/downloads jika diperlukan
+```
+
+Pada Windows, centang "Add Python to PATH" saat instalasi.
+
+### 2. Instal Node.js 18 atau lebih baru
+
+Diperlukan untuk Azure Functions Core Tools.
+
+```bash
+node --version
+# Harus menampilkan v18.x.x atau lebih tinggi
+```
+
+### 3. Instal Azure Functions Core Tools
+
+```bash
+npm install -g azure-functions-core-tools@4 --unsafe-perm true
+
+# Verifikasi
+func --version
+```
+
+### 4. Instal Azure CLI
+
+Unduh dari https://docs.microsoft.com/cli/azure/install-azure-cli, lalu:
+
+```bash
+az --version
+
+# Login ke akun Azure Anda
+az login
+```
+
+### 5. Instal ekstensi VS Code (direkomendasikan)
+
+Buka VS Code, masuk ke Extensions (Ctrl+Shift+X), dan instal:
+
+- Python (Microsoft)
+- Azure Functions (Microsoft)
+- Azure Tools (Microsoft)
+- Pylance (Microsoft)
+
+### 6. Dapatkan API Key Anthropic
+
+1. Buka https://console.anthropic.com
+2. Navigasi ke API Keys
+3. Klik Create Key
+4. Salin key tersebut — diawali dengan `sk-ant-` dan hanya ditampilkan sekali
+
+Jaga kerahasiaan key ini. Jangan commit ke Git.
+
+---
+
+## Fase 1: Penyediaan Azure
+
+**Estimasi waktu: 45 menit**
+
+Semua resource menggunakan free tier. Tidak ada biaya yang dikenakan dalam batas free tier yang tercantum di [Ringkasan Azure Free Tier](#ringkasan-azure-free-tier).
+
+### 1. Buat Resource Group
+
+Resource group adalah wadah untuk semua resource Azure dalam proyek ini.
+
+```bash
+az group create \
+  --name omniServe-rg \
+  --location southeastasia
+
+# Verifikasi
+az group show --name omniServe-rg
+```
+
+Region `southeastasia` (Singapura) digunakan untuk latensi terendah dari Indonesia. Semua resource berikutnya harus dibuat dalam resource group yang sama.
+
+### 2. Buat Azure AI Language
+
+Digunakan untuk deteksi intent, analisis sentimen, dan ekstraksi frasa kunci.
+Free tier: 5.000 transaksi teks per bulan.
+
+```bash
+az cognitiveservices account create \
+  --name omniServe-language \
+  --resource-group omniServe-rg \
+  --kind TextAnalytics \
+  --sku F0 \
+  --location southeastasia
+
+# Dapatkan endpoint
+az cognitiveservices account show \
+  --name omniServe-language \
+  --resource-group omniServe-rg \
+  --query properties.endpoint \
+  --output tsv
+
+# Dapatkan key
+az cognitiveservices account keys list \
+  --name omniServe-language \
+  --resource-group omniServe-rg \
+  --query key1 \
+  --output tsv
+```
+
+Simpan endpoint dan key ke `.env` sebagai `AZURE_LANGUAGE_ENDPOINT` dan `AZURE_LANGUAGE_KEY`.
+
+### 3. Buat Azure AI Translator
+
+Digunakan untuk dukungan multibahasa — mendeteksi bahasa dan menerjemahkan antara bahasa Indonesia, Inggris, Jawa, Sunda, dan bahasa lainnya.
+Free tier: 2 juta karakter per bulan.
+
+```bash
+az cognitiveservices account create \
+  --name omniServe-translator \
+  --resource-group omniServe-rg \
+  --kind TextTranslation \
+  --sku F0 \
+  --location global
+
+# Dapatkan key
+az cognitiveservices account keys list \
+  --name omniServe-translator \
+  --resource-group omniServe-rg \
+  --query key1 \
+  --output tsv
+```
+
+Translator harus dibuat di lokasi `global`, bukan lokasi regional.
+
+Simpan key ke `.env` sebagai `AZURE_TRANSLATOR_KEY`.
+
+### 4. Buat Azure Cosmos DB
+
+Digunakan untuk riwayat percakapan dan persistensi state sesi.
+Free tier: 1.000 RU/s + 25 GB penyimpanan.
+
+```bash
+# Buat akun
+az cosmosdb create \
+  --name omniserve-cosmos \
+  --resource-group omniServe-rg \
+  --default-consistency-level Session
+
+# Buat database
+az cosmosdb sql database create \
+  --account-name omniserve-cosmos \
+  --resource-group omniServe-rg \
+  --name omniServe
+
+# Buat container — partition key pada /user_id untuk performa kueri
+az cosmosdb sql container create \
+  --account-name omniserve-cosmos \
+  --resource-group omniServe-rg \
+  --database-name omniServe \
+  --name conversations \
+  --partition-key-path /user_id
+
+# Dapatkan endpoint
+az cosmosdb show \
+  --name omniserve-cosmos \
+  --resource-group omniServe-rg \
+  --query documentEndpoint \
+  --output tsv
+
+# Dapatkan key
+az cosmosdb keys list \
+  --name omniserve-cosmos \
+  --resource-group omniServe-rg \
+  --query primaryMasterKey \
+  --output tsv
+```
+
+Simpan nilai ke `.env` sebagai `COSMOS_ENDPOINT` dan `COSMOS_KEY`.
+
+### 5. Buat Azure AI Search
+
+Digunakan untuk pengambilan basis pengetahuan — FAQ, SOP, dan informasi produk.
+Free tier: indeks 50 MB, 10.000 dokumen, maksimum 3 indeks.
+
+```bash
+az search service create \
+  --name omniserve-search \
+  --resource-group omniServe-rg \
+  --sku free \
+  --location southeastasia
+
+# Dapatkan admin key
+az search admin-key show \
+  --service-name omniserve-search \
+  --resource-group omniServe-rg \
+  --query primaryKey \
+  --output tsv
+```
+
+Endpoint search mengikuti format `https://omniserve-search.search.windows.net`.
+
+Simpan nilai ke `.env` sebagai `AZURE_SEARCH_ENDPOINT` dan `AZURE_SEARCH_KEY`.
+
+Setelah penyediaan, buat indeksnya. Indeks memerlukan field: `id`, `title`, `content`, `category`. Buat melalui Azure Portal di bawah resource search, atau gunakan skema di `docs/create-search-index.json`.
+
+### 6. Buat Azure Bot Service
+
+Digunakan untuk manajemen sesi, perutean kanal, dan penanganan webhook.
+Free tier: pesan tidak terbatas pada kanal standar.
+
+```bash
+# Buat pendaftaran aplikasi di Entra ID
+az ad app create --display-name "OmniServe-Bot"
+# Catat appId dari output
+
+# Buat client secret
+az ad app credential reset --id <APP_ID>
+# Catat password dari output
+
+# Buat Bot Service
+az bot create \
+  --resource-group omniServe-rg \
+  --name omniServe-bot \
+  --kind registration \
+  --appid <APP_ID>
+```
+
+Simpan nilai ke `.env` sebagai `BOT_APP_ID` dan `BOT_APP_PASSWORD`.
+
+### 7. Buat Azure Static Web Apps
+
+Untuk hosting dashboard frontend. Free tier tersedia secara permanen.
+
+```bash
+az staticwebapp create \
+  --name omniserve-web \
+  --resource-group omniServe-rg \
+  --location eastasia
+```
+
+---
+
+## Fase 2: Pengaturan Lokal
+
+**Estimasi waktu: 20 menit**
+
+### 1. Ekstrak scaffold dan buat virtual environment
+
+```bash
+unzip omniServe-scaffold.zip
+cd omniServe
+
+# Buat virtual environment
+python -m venv venv
+
+# Aktifkan di Mac/Linux
+source venv/bin/activate
+
+# Aktifkan di Windows
+venv\Scripts\activate
+
+# Instal dependensi
+pip install -r requirements.txt
+```
+
+Prompt terminal akan berubah menjadi `(venv)` setelah aktivasi. Jika tidak, environment belum aktif.
+
+### 2. Konfigurasi variabel lingkungan
+
+```bash
+cp .env.example .env
+```
+
+Buka `.env` dan isi semua nilai yang diperoleh dari Fase 1. Lihat bagian [Referensi Variabel Lingkungan](#referensi-variabel-lingkungan) untuk deskripsi lengkap setiap variabel.
+
+### 3. Isi basis pengetahuan
+
+Buat file bernama `knowledge-base.json` dengan konten FAQ dan SOP Anda. Field minimum yang diperlukan per dokumen adalah `id`, `title`, `content`, dan `category`.
+
+Contoh:
+
+```json
+[
+  {
+    "id": "1",
+    "title": "Kebijakan Pengiriman",
+    "content": "Pengiriman standar memakan waktu 2-3 hari kerja. Gratis ongkir untuk pesanan di atas Rp100.000.",
+    "category": "shipping"
+  },
+  {
+    "id": "2",
+    "title": "Prosedur Pengembalian",
+    "content": "Pengembalian diterima dalam 7 hari setelah barang diterima. Hubungi layanan pelanggan untuk mendapatkan label pengembalian.",
+    "category": "returns"
+  },
+  {
+    "id": "3",
+    "title": "Metode Pembayaran",
+    "content": "Kami menerima transfer bank, kartu kredit, GoPay, OVO, dan DANA.",
+    "category": "payment"
+  }
+]
+```
+
+Unggah ke indeks Azure AI Search:
+
+```bash
+curl -X POST \
+  "https://omniserve-search.search.windows.net/indexes/knowledge-base/docs/index?api-version=2024-05-01-preview" \
+  -H "Content-Type: application/json" \
+  -H "api-key: <AZURE_SEARCH_KEY>" \
+  -d @knowledge-base.json
+```
+
+Semakin banyak dokumen dalam indeks, semakin akurat respons OmniServe. Kategori yang direkomendasikan: shipping, returns, products, payment, complaints, general.
+
+---
+
+## Fase 3: Menjalankan dan Menguji
+
+**Estimasi waktu: 15 menit**
+
+### 1. Jalankan server FastAPI
+
+```bash
+uvicorn app.main:app --reload --port 8000
+```
+
+Flag `--reload` me-restart server secara otomatis saat file berubah. Buka dokumentasi API interaktif di http://localhost:8000/docs.
+
+Verifikasi server dalam keadaan sehat:
+
+```bash
+curl http://localhost:8000/health
+```
+
+Respons yang diharapkan:
+
+```json
+{
+  "status": "sehat",
+  "service": "OmniServe API",
+  "version": "1.0.0"
+}
+```
+
+### 2. Uji pipeline pesan
+
+Kirim pesan dalam bahasa Indonesia:
+
+```bash
+curl -X POST http://localhost:8000/bot/webhook \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "user_001",
+    "session_id": "sess_test_01",
+    "text": "Halo, saya mau cek status pesanan saya",
+    "channel": "web"
+  }'
+```
+
+Kirim pesan dalam bahasa Inggris — translator harus mendeteksi otomatis dan merespons dalam bahasa Inggris:
+
+```bash
+curl -X POST http://localhost:8000/bot/webhook \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "user_002",
+    "session_id": "sess_test_02",
+    "text": "Where is my order? I ordered 3 days ago.",
+    "channel": "web"
+  }'
+```
+
+Uji pemicu eskalasi — sentimen negatif dikombinasikan dengan intent komplain:
+
+```bash
+curl -X POST http://localhost:8000/bot/webhook \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "user_003",
+    "session_id": "sess_test_03",
+    "text": "Saya sangat kecewa! Barang saya rusak dan tidak ada yang merespons.",
+    "channel": "web"
+  }'
+```
+
+Respons uji eskalasi harus menyertakan `"escalate": true` dan array `used_services` harus mendaftar kelima layanan Azure ditambah Claude.
+
+### 3. Jalankan uji unit
+
+```bash
+# Jalankan semua tes dengan output verbose
+pytest tests/ -v
+
+# Jalankan file tes tertentu
+pytest tests/test_translator.py -v
+
+# Jalankan dengan traceback singkat saat gagal
+pytest tests/ -v --tb=short
+```
+
+Semua 17 tes harus lolos. Tes menggunakan mock dan tidak memerlukan koneksi Azure langsung.
+
+---
+
+## Fase 4: Deploy ke Azure
+
+**Estimasi waktu: 30 menit**
+
+### 1. Buat Storage Account
+
+Diperlukan oleh Azure Function App.
+
+```bash
+az storage account create \
+  --name omniservestorage \
+  --resource-group omniServe-rg \
+  --location southeastasia \
+  --sku Standard_LRS
+```
+
+### 2. Buat dan deploy Function App
+
+```bash
+az functionapp create \
+  --resource-group omniServe-rg \
+  --consumption-plan-location southeastasia \
+  --runtime python \
+  --runtime-version 3.11 \
+  --functions-version 4 \
+  --name omniserve-functions \
+  --storage-account omniservestorage
+```
+
+Atur semua variabel lingkungan di cloud. Nilai-nilai ini harus mencerminkan nilai `.env` lokal Anda:
+
+```bash
+az functionapp config appsettings set \
+  --name omniserve-functions \
+  --resource-group omniServe-rg \
+  --settings \
+    ANTHROPIC_API_KEY="<value>" \
+    AZURE_LANGUAGE_ENDPOINT="<value>" \
+    AZURE_LANGUAGE_KEY="<value>" \
+    AZURE_TRANSLATOR_KEY="<value>" \
+    AZURE_TRANSLATOR_REGION="southeastasia" \
+    COSMOS_ENDPOINT="<value>" \
+    COSMOS_KEY="<value>" \
+    AZURE_SEARCH_ENDPOINT="<value>" \
+    AZURE_SEARCH_KEY="<value>" \
+    BOT_APP_ID="<value>" \
+    BOT_APP_PASSWORD="<value>" \
+    APP_ENV="production"
+```
+
+Deploy kode function:
+
+```bash
+func azure functionapp publish omniserve-functions
+```
+
+### 3. Hubungkan Bot Service ke endpoint yang telah di-deploy
+
+```bash
+az bot update \
+  --resource-group omniServe-rg \
+  --name omniServe-bot \
+  --endpoint "https://omniserve-functions.azurewebsites.net/api/process_message"
+```
+
+Aktifkan kanal melalui Azure Portal:
+
+- Buka omniServe-bot > Channels > Web Chat > Enable
+- Untuk WhatsApp: Channels > WhatsApp (memerlukan Akun Bisnis Meta yang terverifikasi)
+
+### 4. Verifikasi deployment produksi
+
+```bash
+# Pemeriksaan kesehatan
+curl https://omniserve-functions.azurewebsites.net/api/health
+
+# Uji pesan langsung
+curl -X POST \
+  https://omniserve-functions.azurewebsites.net/api/process_message \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "prod_test", "text": "Halo, tes produksi", "channel": "web"}'
+
+# Pantau log secara langsung
+az webapp log tail \
+  --name omniserve-functions \
+  --resource-group omniServe-rg
+```
+
+Permintaan pertama mungkin memakan waktu 3-5 detik karena cold start pada consumption plan. Permintaan berikutnya jauh lebih cepat.
+
+---
+
+## Referensi Variabel Lingkungan
+
+| Variabel | Deskripsi | Sumber |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | API key Anthropic untuk Claude | console.anthropic.com |
+| `CLAUDE_MODEL` | String model Claude | Default: `claude-haiku-4-5-20251001` |
+| `AZURE_LANGUAGE_ENDPOINT` | URL endpoint Azure AI Language | Fase 1, Langkah 2 |
+| `AZURE_LANGUAGE_KEY` | API key Azure AI Language | Fase 1, Langkah 2 |
+| `AZURE_TRANSLATOR_KEY` | API key Azure AI Translator | Fase 1, Langkah 3 |
+| `AZURE_TRANSLATOR_ENDPOINT` | URL dasar Translator | Default: `https://api.cognitive.microsofttranslator.com/` |
+| `AZURE_TRANSLATOR_REGION` | Region Azure untuk Translator | Default: `southeastasia` |
+| `COSMOS_ENDPOINT` | URL endpoint akun Cosmos DB | Fase 1, Langkah 4 |
+| `COSMOS_KEY` | Primary master key Cosmos DB | Fase 1, Langkah 4 |
+| `COSMOS_DATABASE` | Nama database Cosmos DB | Default: `omniServe` |
+| `COSMOS_CONTAINER` | Nama container Cosmos DB | Default: `conversations` |
+| `AZURE_SEARCH_ENDPOINT` | URL endpoint Azure AI Search | Fase 1, Langkah 5 |
+| `AZURE_SEARCH_KEY` | Admin key Azure AI Search | Fase 1, Langkah 5 |
+| `AZURE_SEARCH_INDEX` | Nama indeks search | Default: `knowledge-base` |
+| `BOT_APP_ID` | ID pendaftaran aplikasi Bot Service | Fase 1, Langkah 6 |
+| `BOT_APP_PASSWORD` | Client secret Bot Service | Fase 1, Langkah 6 |
+| `APP_ENV` | Environment runtime | `development` atau `production` |
+| `LOG_LEVEL` | Tingkat verbositas log | `DEBUG`, `INFO`, atau `WARNING` |
+
+---
+
+## Referensi API
+
+### POST /bot/webhook
+
+Endpoint utama untuk menerima pesan dari widget web atau Azure Bot Service.
+
+Body permintaan:
+
+```json
+{
+  "user_id": "string",
+  "session_id": "string (opsional, dibuat otomatis jika dihilangkan)",
+  "text": "string",
+  "channel": "web | whatsapp"
+}
+```
+
+Respons:
+
+```json
+{
+  "session_id": "string",
+  "response_text": "string — dalam bahasa asli pengguna",
+  "response_id": "string",
+  "used_services": [
+    "Azure AI Translator",
+    "Azure AI Language",
+    "Azure Cosmos DB",
+    "Azure AI Search",
+    "Claude Sonnet API"
+  ],
+  "latency_ms": 820,
+  "escalate": false
+}
+```
+
+### POST /bot/whatsapp
+
+Endpoint webhook dalam format WhatsApp Business API. Mengekstrak pesan dari payload WhatsApp dan mengembalikan respons dalam format WhatsApp Send Message API.
+
+### GET /health
+
+Mengembalikan status layanan dan versi. Digunakan oleh Azure untuk pemantauan kesehatan.
+
+---
+
+## Gambaran Arsitektur
+
+```
+Pesan Pengguna (WhatsApp / Widget Web)
+        |
+        v
+Azure Bot Service F0
+  Manajemen sesi, perutean webhook
+        |
+        v
+Azure Functions (Consumption Plan)
+  Logika bisnis, orkestrasi API
+        |
+        +-- Azure AI Translator      deteksi bahasa, terjemahkan ke Indonesia
+        |
+        +-- Azure AI Language        intent, entitas, sentimen, frasa kunci
+        |
+        +-- Azure Cosmos DB          ambil giliran percakapan terkini
+        |
+        +-- Azure AI Search          ambil konteks basis pengetahuan
+        |
+        +-- Claude Sonnet API        hasilkan respons kontekstual
+        |
+        +-- Azure AI Translator      terjemahkan respons kembali ke bahasa pengguna
+        |
+        v
+Azure Cosmos DB
+  Simpan giliran percakapan
+        |
+        v
+Respons dikirim ke pengguna
+  Dalam bahasa asli, target di bawah 1 detik
+```
+
+Alur permintaan (8 langkah):
+
+1. Pengguna mengirim pesan dalam bahasa apa pun melalui WhatsApp atau widget web
+2. Azure Bot Service menerima webhook dan membuat atau melanjutkan sesi
+3. Azure AI Translator mendeteksi bahasa dan menerjemahkan ke bahasa Indonesia
+4. Azure AI Language mengekstrak intent, entitas, dan sentimen
+5. Azure Cosmos DB mengambil giliran percakapan terkini sebagai konteks
+6. Azure AI Search mengambil dokumen basis pengetahuan yang relevan
+7. Claude Sonnet API menghasilkan respons kontekstual dan akurat dalam bahasa Indonesia
+8. Azure AI Translator menerjemahkan respons kembali ke bahasa asli pengguna
+
+---
+
+## Ringkasan Azure Free Tier
+
+| Layanan | Batas Free Tier | Biaya Bulanan |
+|---|---|---|
+| Azure Static Web Apps | Tidak terbatas | Rp 0 |
+| Azure Bot Service F0 | Pesan tidak terbatas | Rp 0 |
+| Azure Functions Consumption | 1 juta eksekusi | Rp 0 |
+| Azure AI Language | 5.000 catatan teks | Rp 0 |
+| Azure AI Translator | 2 juta karakter | Rp 0 |
+| Azure Cosmos DB | 1.000 RU/s + 25 GB | Rp 0 |
+| Azure AI Search | Indeks 50 MB | Rp 0 |
+| **Total** | | **Rp 0 / bulan** |
