@@ -3,7 +3,7 @@
 Otomasi layanan pelanggan multibahasa berbasis AI untuk UKM Indonesia.
 Dibangun untuk Tema 26 (AI & Otomasi Layanan) — Dicoding AI Impact Challenge 2026.
 
-**Tumpukan Teknologi:** Python · FastAPI · Azure Bot Service · Azure AI Language · Azure AI Translator · Azure Cosmos DB · Azure AI Search · Claude Sonnet API
+**Tumpukan Teknologi:** Python · FastAPI · Azure Bot Service · Azure AI Language · Azure AI Translator · Azure Cosmos DB · Azure AI Search · Claude API
 
 ---
 
@@ -34,7 +34,7 @@ omniServe/
 │   │   └── health.py              # Pemeriksaan kesehatan
 │   ├── services/
 │   │   ├── pipeline.py            # Orkestrasi inti pesan 8 langkah
-│   │   ├── claude_service.py      # Integrasi Claude Sonnet API
+│   │   ├── claude_service.py      # Integrasi Claude API
 │   │   ├── translator_service.py  # Azure AI Translator
 │   │   ├── language_service.py    # Azure AI Language (intent, sentimen)
 │   │   ├── search_service.py      # Azure AI Search (basis pengetahuan)
@@ -58,7 +58,6 @@ omniServe/
 ├── requirements.txt               # Dependensi Python
 ├── host.json                      # Konfigurasi host Azure Functions
 ├── pytest.ini                     # Konfigurasi pytest
-├── CLAUDE.md                      # Instruksi proyek Claude Code
 └── README.md                      # File ini
 ```
 
